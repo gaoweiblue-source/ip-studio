@@ -1193,6 +1193,26 @@ function renderContent() {
   el.counter.textContent = `${countChars(text)} 字`;
 }
 
+// Measure a detached-from-flow copy so typing never collapses the live document.
+function resizeEditor() {
+  const mirror = el.editor.cloneNode(false);
+  mirror.removeAttribute('id');
+  mirror.removeAttribute('name');
+  mirror.setAttribute('aria-hidden', 'true');
+  mirror.tabIndex = -1;
+  const style = getComputedStyle(el.editor);
+  Object.assign(mirror.style, {
+    position: 'fixed', top: '0', left: '-100000px', visibility: 'hidden',
+    width: `${el.editor.getBoundingClientRect().width}px`, height: '0',
+    minHeight: '0', maxHeight: 'none', overflow: 'hidden', pointerEvents: 'none',
+  });
+  mirror.value = el.editor.value;
+  document.body.appendChild(mirror);
+  const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+  el.editor.style.height = `${Math.max(360, mirror.scrollHeight + border)}px`;
+  mirror.remove();
+}
+
 function setMode(mode) {
   if (state.streaming) return;
   if (state.mode === 'edit' && mode !== 'edit') flushSave();   // 离开编辑就落盘
@@ -1205,9 +1225,10 @@ function setMode(mode) {
   el.cuesPane.classList.toggle('hidden', !cueing);
   syncModeUi(mode);
   hideMenus();
+  if (!editing && !cueing) renderContent();
   if (editing) {
     el.editor.value = state.draft?.content || '';
-    el.editor.style.height = `${Math.max(360, el.editor.scrollHeight)}px`;
+    resizeEditor();
     el.editor.focus();
   }
   if (cueing) renderCues(state.draft?.cues);
@@ -1216,6 +1237,7 @@ function setMode(mode) {
 
 /* ---------------- 保存 ---------------- */
 let saveTimer;
+let saving = false;
 
 function markDirty() {
   state.dirty = true;
@@ -1227,22 +1249,39 @@ function markDirty() {
 
 async function flushSave() {
   clearTimeout(saveTimer);
-  if (!state.dirty || !state.draft) return;
-  const content = state.draft.content;
+  if (saving || !state.dirty || !state.draft) return;
+  const current = state.draft;
+  const content = current.content;
+  const id = current.id;
+  saving = true;
+  let saved = false;
   state.dirty = false;
   el.saveState.textContent = '保存中…';
   el.saveState.className = 'save-state';
   try {
-    const { draft } = await api(`/drafts/${state.draft.id}/content`, { method: 'PUT', body: { content } });
-    state.draft = draft;          // 服务端已把 cues 清掉：正文变了，旧的口播提示就对不上了
+    const { draft } = await api(`/drafts/${id}/content`, { method: 'PUT', body: { content } });
+    saved = true;
+    if (state.draft !== current) return;
+    // A save response must never replace text typed while the request was in flight.
+    const latest = current.content;
+    const changed = latest !== content;
+    state.draft = { ...draft, content: changed ? latest : draft.content };
+    state.dirty = state.dirty || changed;
     if (state.mode === 'cue') renderCues(null);
-    el.saveState.textContent = '已保存';
-    el.saveState.className = 'save-state saved';
+    el.saveState.textContent = state.dirty ? '未保存' : '已保存';
+    el.saveState.className = state.dirty ? 'save-state dirty' : 'save-state saved';
     loadHistory();
   } catch (err) {
+    if (state.draft !== current) return;
     state.dirty = true;
     el.saveState.textContent = `保存失败：${err.message}`;
     el.saveState.className = 'save-state dirty';
+  } finally {
+    saving = false;
+    if (saved && state.dirty) {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(flushSave, 0);
+    }
   }
 }
 
@@ -1257,8 +1296,7 @@ el.editor.addEventListener('input', () => {
   if (!state.draft) return;
   state.draft.content = el.editor.value;
   el.counter.textContent = `${countChars(el.editor.value)} 字`;
-  el.editor.style.height = 'auto';
-  el.editor.style.height = `${Math.max(360, el.editor.scrollHeight)}px`;
+  resizeEditor();
   markDirty();
   detectSlash();
 });
