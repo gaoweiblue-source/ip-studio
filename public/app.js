@@ -1,4 +1,7 @@
 /* 前端逻辑：登录 → 简报 → 三个方向 → 流式成稿 → 历史 */
+import { initResearch, assistSnapshotValid } from './research.js';
+import { buildSelectionMap, findRawSelection } from './selection-map.js';
+import { variantIsStale } from './content-fingerprint.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -90,6 +93,10 @@ const state = {
 };
 
 const currentPersona = () => state.personas.find((p) => p.id === state.personaId) || null;
+const researchUi = initResearch({ state, api, setDraft, loadHistory, toast, currentPersona, esc,
+  ensureSaved: async () => { await flushSave(); return !saving && !state.dirty; },
+  canSwitchDraft: () => !saving && !state.dirty,
+});
 
 const PERSONA_FIELDS = [
   'name', 'platform', 'tone', 'content_focus', 'audience', 'problem', 'notes',
@@ -285,6 +292,7 @@ function renderPersonaBar() {
     ? `本篇按账号「${p.name}」的设定创作`
     : '未绑定账号 · 本篇不带账号语境';
   el.inheritNote.classList.toggle('free', !p);
+  researchUi.reset();
 }
 
 
@@ -305,6 +313,7 @@ el.personaList.addEventListener('click', (e) => {
 });
 
 function resetBrief() {
+  closeAssist();
   state.draft = null;
   goStep(1);
   el.briefForm.reset();
@@ -452,6 +461,7 @@ el.ideasList.addEventListener('click', (e) => {
 
 /* 选定题材（可能挂着一条热点，一起带进创作） */
 function useSubject(subject, hotspot) {
+  $('legacyBrief').open = true;
   state.pendingHotspot = hotspot;
   el.briefForm.subject.value = subject;
   el.briefForm.subject.focus();
@@ -490,6 +500,7 @@ function editCurrentPersona() {
 el.skipOnboardBtn.addEventListener('click', () => {
   state.skipOnboard = true;
   renderPersonaBar();
+  $('legacyBrief').open = true;
   el.briefForm.subject.focus();
 });
 
@@ -673,7 +684,12 @@ el.newBtn.addEventListener('click', () => {
 
 /* ---------------- 渲染方向 ---------------- */
 function setDraft(draft) {
+  closeAssist();
   state.draft = draft;
+  researchUi.showDraft(draft);
+  const back = el.contentCard.querySelector('.step-back');
+  back.dataset.goto = draft.research ? '1' : '2';
+  back.textContent = draft.research ? '← 导入新材料' : '← 换方向';
   fillBrief(draft);
   renderTopics(draft);
 
@@ -1075,6 +1091,7 @@ function reachable(n) {
 }
 
 function markSteps(current, done = false) {
+  renderCreationSteps();
   [...el.steps.children].forEach((li) => {
     const n = Number(li.dataset.step);
     li.classList.toggle('active', n === current);
@@ -1082,6 +1099,15 @@ function markSteps(current, done = false) {
     li.classList.toggle('reachable', n !== current && reachable(n));
   });
 }
+
+function renderCreationSteps() {
+  const research = state.step === 3 ? Boolean(state.draft?.research)
+    : state.step === 1 && !$('legacyBrief').open;
+  el.steps.children[0].innerHTML = `<b>1</b> ${research ? '导入研究材料' : '确定选题'}`;
+  el.steps.children[1].classList.toggle('hidden', research);
+  el.steps.children[2].innerHTML = `<b>${research ? '2' : '3'}</b> 编辑与确认`;
+}
+$('legacyBrief').addEventListener('toggle', renderCreationSteps);
 
 el.steps.addEventListener('click', (e) => {
   const li = e.target.closest('.step');
@@ -1121,9 +1147,12 @@ async function busy(btn, fn) {
 
 const countChars = (s) => s.replace(/\s/g, '').length;
 
-const esc = (s) => String(s ?? '')
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+// Function declarations are available during the early research UI bootstrap.
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 /* 极简 Markdown 渲染：先转义再套标签，够用且安全 */
 function markdown(src) {
@@ -1346,7 +1375,8 @@ function placeMenu(node, point) {
 function openSelMenu(point, target) {
   state.selTarget = target;
   el.selMenu.innerHTML = ASSIST_ACTIONS
-    .map((a) => `<button data-action="${a.key}">${a.label}</button>`).join('');
+    .map((a) => `<button data-action="${a.key}">${a.label}</button>`).join('')
+    + (state.draft?.research ? '<label class="research-custom-label">自定义改写要求<input id="researchSelectionInstruction" maxlength="2000" placeholder="如：更简洁，保留数据与限制条件" /></label><button type="button" data-research-custom>按要求改写</button>' : '');
   placeMenu(el.selMenu, point);
 }
 
@@ -1365,9 +1395,12 @@ function editorSelection() {
 }));
 
 /* 阅读模式：把渲染文本里的选区反查回 Markdown 原文的偏移 */
-document.addEventListener('mouseup', () => {
+document.addEventListener('mouseup', (event) => {
+  if ([el.selMenu, el.slashMenu, el.assistPop].some(node => node.contains(event.target))) return;
   if (state.mode !== 'read' || !state.draft?.content) return;
+  const draft = state.draft, snapshot = draft.content;
   setTimeout(() => {
+    if (state.mode !== 'read' || state.draft !== draft || state.draft.content !== snapshot) return;
     const selection = window.getSelection();
     if (!selection.rangeCount || selection.isCollapsed) { el.selMenu.classList.add('hidden'); return; }
     const range = selection.getRangeAt(0);
@@ -1376,24 +1409,29 @@ document.addEventListener('mouseup', () => {
     if (text.length < 2) return;
 
     const target = locateInRaw(text, range);
-    if (!target) { toast('这段包含格式符号，切到「编辑」再选一次就能改'); return; }
+    if (!target) { toast('无法定位这段选区，请重新选择或稍微扩大范围'); return; }
     openSelMenu(range.getBoundingClientRect(), target);
   }, 0);
 });
 
-/* 同一句话可能出现多次：用它在渲染文本里的相对位置挑最接近的那处 */
+/* 同一句话可能出现多次：用它在渲染文本里的相对位置挑最接近的那处。
+   第一优先是可见文字到 Markdown 的映射，精确原文查找只作为兼容兜底。 */
 function locateInRaw(text, range) {
-  const raw = state.draft.content;
+  const raw = currentText();
+  const map = buildSelectionMap(raw);
+  const probe = document.createRange();
+  probe.selectNodeContents(el.content);
+  probe.setEnd(range.startContainer, range.startOffset);
+  const ratio = probe.toString().length / (el.content.innerText.length || 1);
+  const mapped = findRawSelection(raw, text, ratio * map.text.length);
+  if (mapped) return mapped;
+
   const hits = [];
   for (let i = raw.indexOf(text); i !== -1; i = raw.indexOf(text, i + 1)) hits.push(i);
   if (!hits.length) return null;
 
   let start = hits[0];
   if (hits.length > 1) {
-    const probe = document.createRange();
-    probe.selectNodeContents(el.content);
-    probe.setEnd(range.startContainer, range.startOffset);
-    const ratio = probe.toString().length / (el.content.innerText.length || 1);
     const guess = ratio * raw.length;
     start = hits.reduce((best, i) => (Math.abs(i - guess) < Math.abs(best - guess) ? i : best), hits[0]);
   }
@@ -1401,6 +1439,14 @@ function locateInRaw(text, range) {
 }
 
 el.selMenu.addEventListener('click', (e) => {
+  if (e.target.closest('[data-research-custom]')) {
+    const instruction = $('researchSelectionInstruction')?.value.trim();
+    if (!instruction) return;
+    const target = state.selTarget;
+    hideMenus();
+    runAssist({ instruction, kind: 'rewrite', target }, instruction);
+    return;
+  }
   const btn = e.target.closest('button[data-action]');
   if (!btn) return;
   const action = btn.dataset.action;
@@ -1479,8 +1525,15 @@ document.addEventListener('mousedown', (e) => {
 
 async function runAssist(req, label) {
   const draft = state.draft;
-  if (!draft) return;
-  state.assist = { ...req, label, text: '' };
+  if (!draft || !req.target) return;
+  const version = ver.current;
+  const raw = currentText();
+  if (raw.slice(req.target.start, req.target.end) !== req.target.text) { toast('选区已改变，请重新选中文字'); return; }
+  closeAssist();
+  const request = { ...req, label, text: '', draftId: draft.id, snapshot: raw, controller: new AbortController(), version };
+  state.assist = request;
+  $('assistSaveRule').classList.toggle('hidden', !draft.research);
+  $('assistSaveRule').disabled = true;
 
   el.assistTitle.textContent = `AI · ${label}`;
   el.assistBody.textContent = '';
@@ -1493,7 +1546,6 @@ async function runAssist(req, label) {
   positionAssist();
 
   const { start, end, text } = req.target;
-  const raw = draft.content;
   const body = {
     kind: req.kind === 'compose' ? 'compose' : 'rewrite',
     action: req.action,
@@ -1504,13 +1556,14 @@ async function runAssist(req, label) {
   };
 
   try {
-    const res = await fetch(`/api/drafts/${draft.id}/assist`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    const res = await fetch(`/api/drafts/${draft.id}/${draft.research ? 'research-assist' : 'assist'}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: request.controller.signal,
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || '请求失败');
 
     let out = '';
     await readSSE(res, (event, data) => {
+      if (state.assist !== request) return;
       if (event === 'delta') {
         out += data.text;
         el.assistBody.textContent = out;
@@ -1522,10 +1575,14 @@ async function runAssist(req, label) {
         throw new Error(data.message);
       }
     });
+    if (state.assist !== request) return;
+    if (!assistSnapshotValid(request, state.draft) || request.version !== ver.current) throw new Error('稿件或正文已改变，请关闭结果并重新选择文字。');
     state.assist.text = out.trim();
+    $('assistSaveRule').disabled = !state.assist.text;
     el.assistReplace.disabled = !state.assist.text;
     el.assistInsert.disabled = !state.assist.text;
   } catch (err) {
+    if (state.assist !== request || request.controller.signal.aborted) return;
     el.assistBody.innerHTML = `<span class="err">${esc(err.message)}</span>`;
   }
 }
@@ -1538,6 +1595,7 @@ function positionAssist() {
 }
 
 function closeAssist() {
+  state.assist?.controller?.abort();
   el.assistPop.classList.add('hidden');
   state.assist = null;
 }
@@ -1545,17 +1603,20 @@ function closeAssist() {
 el.assistClose.addEventListener('click', closeAssist);
 el.assistRetry.addEventListener('click', () => {
   const a = state.assist;
+  if (a && (!assistSnapshotValid(a, state.draft) || a.version !== ver.current)) { toast('稿件或正文已改变，请重新选择文字'); closeAssist(); return; }
   if (a) runAssist({ action: a.action, kind: a.kind, instruction: a.instruction, target: a.target }, a.label);
 });
 
 el.assistReplace.addEventListener('click', () => applyAssist('replace'));
 el.assistInsert.addEventListener('click', () => applyAssist('after'));
 
-function applyAssist(how) {
+async function applyAssist(how) {
   const a = state.assist;
   if (!a?.text) return;
+  if (!assistSnapshotValid(a, state.draft) || a.version !== ver.current) { toast('稿件或正文已改变，请重新选择文字'); closeAssist(); return; }
   const { start, end } = a.target;
-  const raw = state.draft.content;
+  const raw = a.version ? state.draft.variants?.[a.version]?.content : state.draft.content;
+  if (typeof raw !== 'string') { toast('当前版本已经不存在，请重新选择'); closeAssist(); return; }
 
   const next = how === 'replace' && a.kind !== 'compose'
     ? raw.slice(0, start) + a.text + raw.slice(end)
@@ -1563,9 +1624,30 @@ function applyAssist(how) {
       ? insertAt(raw, start, a.text)
       : insertAt(raw, end, a.text);
 
-  state.draft.content = next;
-  renderContent();
-  markDirty();
+  if (a.version) {
+    try {
+      const { draft } = await api(`/drafts/${a.draftId}/variants/${encodeURIComponent(a.version)}`, {
+        method: 'PUT',
+        body: { content: next, previous: raw },
+      });
+      if (state.draft?.id !== a.draftId) {
+        closeAssist();
+        toast('改写已保存到原平台版本');
+        return;
+      }
+      state.draft = draft;
+      renderVersionTabs();
+      renderIllusBar();
+      if (ver.current === a.version) showVersion();
+    } catch (err) {
+      toast(`版本保存失败：${err.message}`);
+      return;
+    }
+  } else {
+    state.draft.content = next;
+    renderContent();
+    markDirty();
+  }
   closeAssist();
   toast(how === 'replace' && a.kind !== 'compose' ? '已替换' : '已插入');
 }
@@ -2647,8 +2729,8 @@ function renderVersionTabs() {
 
   el.verTabs.innerHTML = tab('', `${platformLabel(own)}（原文）`, nowChars, false)
     + keys.map((k) => tab(k, platformLabel(k), made[k].chars,
-      // 改写时依据的正文长度和现在对不上，说明正文后来被编辑过
-      made[k].fromChars !== undefined && made[k].fromChars !== nowChars)).join('');
+      // 优先比对生成时保存的正文指纹；旧数据回落到裁剪后的长度。
+      variantIsStale(made[k], state.draft.content))).join('');
 }
 
 el.verTabs.addEventListener('click', (e) => {

@@ -11,6 +11,7 @@ import {
   register, sessionCookie, startAdminSession, startSession, validateCredentials,
 } from './auth.js';
 import { PROVIDER, generateJSON, generateText, providerInfo, streamText } from './llm.js';
+import { withHeadingReview } from './heading-review.js';
 import { ASSEMBLY, PRINCIPLE, PROMPT_DOCS, STAGES } from './promptdocs.js';
 import { costOf, loadPricing, priceOf } from './pricing.js';
 import { pickVariant, scoreText, scoreTopics, summarize } from './abtest.js';
@@ -24,6 +25,7 @@ loadPricing();
 import { mockContent, mockTopics } from './mock.js';
 import { enrichSummaries, fetchBoards, parseManual, riskOf, screenItems } from './hotspots.js';
 import { generate, imageInfo } from './images.js';
+import { contentFingerprint } from '../public/content-fingerprint.js';
 import {
   CONTENT_SYSTEM, DEFAULT_PLATFORM, DEFAULT_TONE, PLATFORMS, TONES,
   ASSIST_ACTIONS, ASSIST_SYSTEM, COMPOSE_ACTIONS, DIGEST_SYSTEM, GENDERS,
@@ -898,7 +900,7 @@ async function reviewText(draft, text, persona, samples, meta = {}) {
   const risk = flags.find((f) => f.level === '高') ? '高'
     : flags.length ? '中' : '无';
 
-  return {
+  return withHeadingReview({
     verdict,
     risk,
     summary: String(data.summary || '').trim(),
@@ -907,7 +909,7 @@ async function reviewText(draft, text, persona, samples, meta = {}) {
     padded,                                        // 被判定为凑数而丢掉的提示条数
     dropped: data.issues.length - issues.length,   // 原文里对不上的，如实告诉前端
     at: new Date().toISOString(),
-  };
+  }, text);
 }
 
 const mockReview = (text, draft) => ({
@@ -1299,13 +1301,50 @@ export async function handleVariant(req, res, body, params) {
   variants[to] = {
     content: out,
     chars: out.length,
-    // 记下改写时依据的原文长度：正文后来被编辑过的话，界面上要提示这版已经旧了
+    // 记下改写时依据的原稿快照；正文后来变过就提示这版需要重做。
     fromChars: text.length,
+    fromFingerprint: contentFingerprint(draft.content),
     from,
     at: new Date().toISOString(),
   };
   Drafts.setVariants(draft.id, user.id, variants);
   json(res, 200, { platform: to, variant: variants[to] });
+}
+
+export async function handleVariantSave(req, res, body, params) {
+  const user = requireUser(req);
+  const draft = Drafts.byId(Number(params.id), user.id);
+  if (!draft) throw new HttpError(404, '记录不存在');
+
+  const platform = String(params.platform || '');
+  const current = draft.variants?.[platform];
+  if (!current) throw new HttpError(404, '这个平台版本还没生成');
+
+  const content = String(body?.content ?? '');
+  if (content.length > 60000) throw new HttpError(400, '正文过长');
+  if (body?.previous !== undefined && String(body.previous) !== current.content) {
+    throw new HttpError(409, '这个版本刚刚被修改过，请重新选择文字');
+  }
+
+  const variants = {
+    ...draft.variants,
+    [platform]: {
+      ...current,
+      content,
+      chars: content.length,
+      editedAt: new Date().toISOString(),
+    },
+  };
+  Drafts.setVariants(draft.id, user.id, variants);
+
+  /* Illustrations were positioned against the old version text. */
+  if (draft.illus && Object.hasOwn(draft.illus, platform)) {
+    const illus = { ...draft.illus };
+    delete illus[platform];
+    Drafts.setIllus(draft.id, user.id, illus);
+  }
+
+  json(res, 200, { draft: Drafts.byId(draft.id, user.id), variant: variants[platform] });
 }
 
 export async function handleVariantDelete(req, res, body, params) {

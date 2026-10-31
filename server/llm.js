@@ -44,16 +44,17 @@ export const setUsageSink = (fn) => { usageSink = fn; };
 
 /* 配额在这里统一拦，不在十几个调用点各写一遍——那样一定会漏一个。
    eval 跑批不占用户额度（它是后台行为，成本记在管理员头上）。 */
-async function tracked(meta, run) {
+const SELF_FUNDED = Symbol('trusted research API');
+async function tracked(meta, run, policy) {
   const started = Date.now();
   const model = PROVIDER === 'anthropic' ? ANTHROPIC_MODEL : PROVIDER === 'openai' ? OPENAI_MODEL : 'mock';
-  const metered = meta.userId && !String(meta.feature || '').startsWith('eval');
+  const metered = policy !== SELF_FUNDED && meta.userId && !String(meta.feature || '').startsWith('eval');
   if (metered) assertQuota(meta.userId, '文案');
   try {
     const { value, usage } = await run();
     const tokens = (usage?.input || 0) + (usage?.output || 0);
     usageSink?.({
-      ...meta, provider: PROVIDER, model, ok: true, ms: Date.now() - started,
+      ...meta, billingPolicy: policy === SELF_FUNDED ? 'research-api' : 'native', provider: PROVIDER, model, ok: true, ms: Date.now() - started,
       inputTokens: usage?.input || 0, outputTokens: usage?.output || 0,
       units: tokens, unit: 'token',
     });
@@ -61,7 +62,7 @@ async function tracked(meta, run) {
     return value;
   } catch (err) {
     usageSink?.({
-      ...meta, provider: PROVIDER, model, ok: false, ms: Date.now() - started,
+      ...meta, billingPolicy: policy === SELF_FUNDED ? 'research-api' : 'native', provider: PROVIDER, model, ok: false, ms: Date.now() - started,
       error: String(err?.message || err),
     });
     throw err;
@@ -71,7 +72,7 @@ async function tracked(meta, run) {
 /* ------------------------------------------------------------------ *
  * 结构化生成：返回符合 schema 的对象
  * ------------------------------------------------------------------ */
-export async function generateJSON({ system, user, schema, mock, meta = {} }) {
+export async function generateJSON({ system, user, schema, mock, meta = {} }, policy) {
   return tracked({ feature: 'unknown', ...meta }, async () => {
     if (PROVIDER === 'mock') return { value: mock(), usage: null };
 
@@ -98,7 +99,7 @@ export async function generateJSON({ system, user, schema, mock, meta = {} }) {
       responseFormat: { type: 'json_object' },
     });
     return { value: parseJSON(res.text), usage: res.usage };
-  });
+  }, policy);
 }
 
 /* ------------------------------------------------------------------ *
@@ -130,8 +131,27 @@ export async function generateText({ system, user, mock, meta = {} }) {
 /* ------------------------------------------------------------------ *
  * 流式正文：逐段回调 onDelta，返回完整文本
  * ------------------------------------------------------------------ */
-export async function streamText({ system, user, onDelta, mock, signal, meta = {} }) {
-  return tracked({ feature: 'unknown', ...meta }, () => streamOnce({ system, user, onDelta, mock, signal }));
+export async function streamText({ system, user, onDelta, mock, signal, meta = {} }, policy) {
+  return tracked({ feature: 'unknown', ...meta }, () => streamOnce({ system, user, onDelta, mock, signal }), policy);
+}
+
+// Only trusted server routes choose this policy; no request-body flags affect billing.
+export function requireResearchAPI() {
+  const configured = PROVIDER === 'openai' ? Boolean(OPENAI_KEY)
+    : PROVIDER === 'anthropic' ? Boolean(process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN) : false;
+  if (!configured) {
+    const error = new Error('研究成文需要有效 API 配置。请在项目 .env 中设置 OPENAI_API_KEY、OPENAI_BASE_URL、OPENAI_MODEL（或 ANTHROPIC_API_KEY），重启服务后重试。');
+    error.status = 503;
+    throw error;
+  }
+}
+export function researchJSON(options) {
+  requireResearchAPI();
+  return generateJSON(options, SELF_FUNDED);
+}
+export function researchStream(options) {
+  requireResearchAPI();
+  return streamText(options, SELF_FUNDED);
 }
 
 async function streamOnce({ system, user, onDelta, mock, signal }) {

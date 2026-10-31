@@ -1635,3 +1635,17 @@ pre, code, .tts-out { font-family: var(--font-mono); }
 .chk-row .n { flex: none; min-width: 90px; font-weight: 600; }
 .chk-row .d { flex: 1; color: var(--muted); font-size: 12px; }
 .chk-row .h { color: var(--faint); font-size: 11.5px; }
+#researchImport { margin-bottom: 24px; }
+#researchImport input[type=file] { width: 100%; padding: 14px 0; }
+#legacyBrief { margin-top: 28px; border-top: 1px solid var(--border, #ddd); padding-top: 18px; }
+#legacyBrief summary, #researchPreview summary, #researchInfo summary { cursor: pointer; padding: 10px 0; }
+#legacyBrief form { margin-top: 18px; }
+#researchText, #researchSavedText, #researchInfo pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; font: inherit; padding: 16px; background: #f6f5f2; }
+#researchWarnings, #researchSavedWarnings, #researchSkillStatus { white-space: pre-wrap; }
+#researchInfo { padding: 0 12px; font-size: 14px; }
+.research-dialog { width: min(850px, 94vw); max-height: 92vh; overflow: auto; border: 1px solid #ddd; border-radius: 14px; padding: 24px; }
+.research-dialog::backdrop { background: #0005; }
+.research-dialog textarea { box-sizing: border-box; width: 100%; font: 14px/1.7 monospace; resize: vertical; }
+.research-dialog .actions { flex-wrap: wrap; gap: 8px; }
+.research-custom-label { display: block; padding: 8px; }
+.research-custom-label input { display: block; min-width: 220px; margin-top: 6px; }

@@ -110,9 +110,18 @@
       <!-- 第一步 -->
       <section class="card" id="briefCard">
         <div class="card-head">
-          <h2>创作简报</h2>
+          <h2>研究材料转文章</h2>
           <span class="inherit-note" id="inheritNote"></span>
         </div>
+        <div id="researchImport">
+          <p>导入研究原文，沿用当前账号设定生成正文与标题。原文会独立保留。</p>
+          <label>研究文件（.docx / .md，最多 5 MB、6 万字符）<input type="file" id="researchFile" accept=".docx,.md" /></label>
+          <label>或直接粘贴 Markdown 内容<textarea id="researchPaste" rows="8" placeholder="把研究内容粘贴到这里，再点击生成文章和标题。最多 6 万字符。"></textarea></label>
+          <p class="hint" id="researchStatus" role="status"></p>
+          <details id="researchPreview" class="hidden"><summary>查看研究原文及解析提示</summary><p id="researchWarnings"></p><pre id="researchText"></pre></details>
+          <div class="actions"><button type="button" class="btn primary" id="researchGenerate" disabled>生成文章和标题</button><button type="button" class="btn ghost small" id="researchSkill">写作 Skill</button></div>
+        </div>
+        <details id="legacyBrief"><summary>从题材创作（原有流程）</summary>
         <form id="briefForm">
           <label class="full">题材 <span class="req">*</span>
             <textarea name="subject" rows="2" maxlength="200" required
@@ -171,6 +180,7 @@
             <span class="hint" id="briefHint"></span>
           </div>
         </form>
+        </details>
       </section>
 
       <!-- 第二步 -->
@@ -212,7 +222,7 @@
               <button type="button" data-act="illus">配图<em>给这一版排插图位并出图</em></button>
               <button type="button" data-act="learn">喂给账号学习<em>作为语气样本，影响以后的成稿</em></button>
               <hr>
-              <button type="button" data-act="review">再检查一遍<em>错字、通顺性、调性与风险</em></button>
+              <button type="button" data-act="review">再检查一遍<em>错字、通顺性、标题层级与编号、调性与风险</em></button>
               <button type="button" data-act="metrics">回填发布数据<em>发完填几个数字，复盘才知道什么有效</em></button>
               <button type="button" data-act="archive">归档<em>收进「已归档」，随时能恢复</em></button>
             </div>
@@ -246,6 +256,7 @@
           </span>
         </div>
         </div><!-- /.head-stick -->
+        <details id="researchInfo" class="hidden"><summary>研究原文、标题与生成信息</summary><div id="researchInfoBody"></div></details>
 
         <div class="review hidden" id="reviewBox">
           <div class="review-head">
@@ -367,6 +378,7 @@
   <div class="assist-body" id="assistBody"></div>
   <div class="assist-foot">
     <button class="btn ghost small" id="assistRetry">重来一次</button>
+    <button class="btn ghost small hidden" id="assistSaveRule">保存为长期规则</button>
     <span class="grow"></span>
     <button class="btn ghost small" id="assistInsert">插入到后面</button>
     <button class="btn primary small" id="assistReplace">替换原文</button>
@@ -445,6 +457,7 @@
         <p class="form-error" id="personaError"></p>
 
         <section class="acc-panel" data-panel="basic">
+          <div class="actions"><button class="btn ghost small" type="button" id="accountWritingSkill">写作 Skill</button><span class="hint">编辑长期写作规则，保存后下次生成生效</span></div>
           <label class="full">账号名称 <span class="req">*</span>
             <input name="name" required maxlength="40" placeholder="例：下班后的厨房" />
           </label>

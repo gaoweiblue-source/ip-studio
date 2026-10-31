@@ -9,6 +9,7 @@ loadEnv();
 
 const { HttpError } = await import('./auth.js');
 const R = await import('./routes.js');
+const Research = await import('./research-routes.js');
 const { providerInfo, setUsageSink } = await import('./llm.js');
 const { DATA_DIR, Usage } = await import('./db.js');
 
@@ -22,6 +23,14 @@ const PORT = Number(process.env.PORT) || 5177;
 const MAX_BODY = 256 * 1024;
 
 const ROUTES = [
+  ['GET', /^\/api\/personas\/(?<id>\d+)\/writing-skill$/, Research.handleSkillGet],
+  ['PUT', /^\/api\/personas\/(?<id>\d+)\/writing-skill$/, Research.handleSkillSave],
+  ['POST', /^\/api\/personas\/(?<id>\d+)\/research-import$/, Research.handleImport],
+  ['POST', /^\/api\/personas\/(?<id>\d+)\/research-generate$/, Research.handleGenerate],
+  ['GET', /^\/api\/research-sources\/(?<id>\d+)$/, Research.handleSource],
+  ['GET', /^\/api\/research-sources\/(?<id>\d+)\/original$/, Research.handleOriginal],
+  ['POST', /^\/api\/drafts\/(?<id>\d+)\/research-assist$/, Research.handleResearchAssist],
+  ['PUT', /^\/api\/drafts\/(?<id>\d+)\/research-title$/, Research.handleResearchTitle],
   ['POST', /^\/api\/auth\/register$/, R.handleRegister],
   ['POST', /^\/api\/auth\/login$/, R.handleLogin],
   ['POST', /^\/api\/auth\/logout$/, R.handleLogout],
@@ -72,6 +81,7 @@ const ROUTES = [
   ['POST', /^\/api\/drafts\/(?<id>\d+)\/review$/, R.handleReview],
   ['POST', /^\/api\/drafts\/(?<id>\d+)\/cues$/, R.handleCues],
   ['POST', /^\/api\/drafts\/(?<id>\d+)\/variants$/, R.handleVariant],
+  ['PUT', /^\/api\/drafts\/(?<id>\d+)\/variants\/(?<platform>\w+)$/, R.handleVariantSave],
   ['POST', /^\/api\/drafts\/(?<id>\d+)\/illus$/, R.handleIllus],
   ['POST', /^\/api\/drafts\/(?<id>\d+)\/illus\/(?<i>\d+)\/image$/, R.handleIllusImage],
   ['DELETE', /^\/api\/drafts\/(?<id>\d+)\/variants\/(?<platform>\w+)$/, R.handleVariantDelete],
@@ -128,7 +138,8 @@ const server = createServer(async (req, res) => {
     try {
       // 支付回调要原文验签，不能先被 JSON.parse 吃掉
       const raw = req.method === 'POST' && /^\/api\/pay\/notify\//.test(path);
-      const body = raw || req.method === 'GET' || req.method === 'DELETE' ? {} : await readJSON(req);
+      const upload = req.method === 'POST' && /^\/api\/personas\/\d+\/research-import$/.test(path);
+      const body = raw || req.method === 'GET' || req.method === 'DELETE' ? {} : await readJSON(req, upload ? 7 * 1024 * 1024 : MAX_BODY);
       await match[2](req, res, body, params, url);
     } catch (err) {
       // QuotaError 自带 402；别把它当 500，前端要靠状态码识别"该升级了"
@@ -152,12 +163,12 @@ const server = createServer(async (req, res) => {
   await serveStatic(path, res);
 });
 
-async function readJSON(req) {
+async function readJSON(req, maxBytes = MAX_BODY) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY) throw new HttpError(413, '请求体过大');
+    if (size > maxBytes) throw new HttpError(413, '请求体过大，请拆分文件或缩短输入后重试。');
     chunks.push(chunk);
   }
   if (!chunks.length) return {};

@@ -398,13 +398,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(user_id, created_at DESC);
 `);
 
+if (!db.prepare('PRAGMA table_info(usage_events)').all().some(c => c.name === 'billing_policy')) {
+  db.exec("ALTER TABLE usage_events ADD COLUMN billing_policy TEXT NOT NULL DEFAULT 'native'");
+}
 export const Usage = {
   record(e) {
     db.prepare(`
       INSERT INTO usage_events
         (user_id, feature, provider, model, ok, ms, input_tokens, output_tokens,
-         units, unit, variant, error, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         units, unit, variant, error, created_at, billing_policy)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       e.userId ?? null, e.feature, e.provider || '', e.model || '',
       e.ok ? 1 : 0, Math.round(e.ms || 0),
@@ -412,7 +415,7 @@ export const Usage = {
       // 计费量：配图按张、大模型按 token
       Number(e.units) || 0, e.unit || '',
       e.variant || '',
-      String(e.error || '').slice(0, 200), now(),
+      String(e.error || '').slice(0, 200), now(), e.billingPolicy || 'native',
     );
   },
 
@@ -434,7 +437,7 @@ export const Usage = {
       SELECT feature, COUNT(*) AS calls, SUM(units) AS units, MAX(unit) AS unit,
              SUM(input_tokens + output_tokens) AS tokens
       FROM usage_events
-      WHERE user_id = ? AND ok = 1 AND created_at LIKE ?
+      WHERE user_id = ? AND ok = 1 AND created_at LIKE ? AND billing_policy = 'native'
       GROUP BY feature ORDER BY calls DESC
     `).all(userId, `${periodPrefix}%`).map((r) => ({ ...r }));
   },
@@ -1055,9 +1058,10 @@ function hydrate(row) {
   const {
     topics_json, persona_json, hotspot_json, section_json,
     inputs_json, cues_json, variants_json, illus_json,
-    metrics_json, user_id, ...rest
+    metrics_json, research_json, user_id, ...rest
   } = row;
   return {
     ...rest, topics, persona, hotspot, section, inputs, cues, variants, illus, metrics,
+    research: research_json ? JSON.parse(research_json) : null,
   };
 }
